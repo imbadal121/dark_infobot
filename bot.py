@@ -233,17 +233,20 @@ async def is_joined(bot, uid: int) -> bool:
 def join_kb() -> InlineKeyboardMarkup:
     rows = []
     if CFG["force_chat_url"]:
-        rows.append([InlineKeyboardButton("📢 Join Channel", url=CFG["force_chat_url"])])
-    rows.append([InlineKeyboardButton("✅ Joined — Check", callback_data="checkjoin")])
+        rows.append([InlineKeyboardButton("👥 Join Group", url=CFG["force_chat_url"])])
+    rows.append([InlineKeyboardButton("🔄 Check Again", callback_data="checkjoin")])
     return InlineKeyboardMarkup(rows)
 
 
-JOIN_TEXT = ("👋 <b>Welcome {brand}</b>\n\n"
-             "Bot use karne ke liye pehle channel join karo:\n"
-             "1️⃣ Neeche 📢 Join Channel dabao\n"
-             "2️⃣ Join karke wapas aao\n"
-             "3️⃣ ✅ Joined — Check dabao\n\n"
-             "Join ke baad <b>{free}</b> free credits milenge 🎁")
+def join_text(user) -> str:
+    name = html.escape(user.first_name or "User")
+    return ("👋 <b>Hello {name}!</b>\n\n"
+            "🔒 Bot use karne ke liye pehle group join karna zaroori hai.\n\n"
+            "1️⃣ Neeche 👥 Join Group dabao\n"
+            "2️⃣ Group join karo\n"
+            "3️⃣ Wapas aake 🔄 Check Again dabao\n\n"
+            "Join karne ke baad <b>{free}</b> free credits milenge 🎁").format(
+                name=name, free=CFG["free_credits"])
 
 
 # ───────────────────────────── menu
@@ -476,7 +479,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     pass
 
     if not await is_joined(ctx.bot, uid):
-        await msg.reply_text(JOIN_TEXT.format(brand=CFG["brand"], free=CFG["free_credits"]),
+       await msg.reply_text(join_text(update.effective_user),
                              parse_mode=ParseMode.HTML, reply_markup=join_kb())
         return
 
@@ -565,14 +568,18 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if d == "checkjoin":
         if await is_joined(ctx.bot, uid):
             await q.answer("✅ Verified!")
-            await q.message.edit_text(welcome(q.from_user), parse_mode=ParseMode.HTML,
-                                      reply_markup=menu_kb())
+            try:
+                await q.message.edit_text(welcome(q.from_user), parse_mode=ParseMode.HTML,
+                                          reply_markup=menu_kb())
+            except Exception:
+                await q.message.reply_text(welcome(q.from_user), parse_mode=ParseMode.HTML,
+                                           reply_markup=menu_kb())
         else:
-            await q.answer("Pehle channel join karo 🙂", show_alert=True)
-        return
-
-    if not await is_joined(ctx.bot, uid):
-        await q.answer("Pehle channel join karo 🙂", show_alert=True)
+            await q.answer(
+                "❌ Group join nahi mila.\n\n"
+                "Pehle 👥 Join Group dabao. Agar request bhej di hai to admin approve karega, "
+                "phir 🔄 Check Again dabao.",
+                show_alert=True)
         return
 
     await q.answer()
@@ -651,7 +658,7 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     get_user(uid)
 
     if not await is_joined(ctx.bot, uid):
-        await msg.reply_text(JOIN_TEXT.format(brand=CFG["brand"], free=CFG["free_credits"]),
+        await msg.reply_text(join_text(user),
                              parse_mode=ParseMode.HTML, reply_markup=join_kb())
         return
 
