@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Number Info Bot — terminal design, force-join + credits + referral."""
+"""DARK_CYBER Number Info Bot — menu UI, credits, referral, history."""
 from __future__ import annotations
 
 import asyncio
@@ -27,18 +27,17 @@ CONF = BASE / "config.json"
 DB = Path(os.getenv("DB_PATH", str(BASE / "numinfo.db")))
 
 DEFAULTS = {
-    "brand": "NUMBER INTEL",
-    "owner": "@your_username",
+    "brand": "DARK_CYBER",
+    "owner": "@Darkxshadow13",
+    "admin_contact": "@Darkxshadow13",
+    "youtube_url": "https://youtube.com/@xdark_cyber?si=GCip_sQPOeUxpZmJ",
     "channel": "OFFICIAL CHANNEL",
-    "youtube": "YOUTUBE CHANNEL",
-    "admin_contact": "@your_username",
-    "buy_url": "",
     "force_chat": "",
     "force_chat_url": "",
     "bot_username": "",
     "send_mode": "pre",
     "free_credits": 3,
-    "refer_credits": 5,
+    "ref_per_credit": 3,
     "cooldown": 3,
     "cache_ttl": 21600,
     "max_results": 3,
@@ -49,8 +48,6 @@ DEFAULTS = {
     "secret": "numinfo",
     "admins": [],
     "providers": [
-        {"name": "unknowns", "url": "https://api.unknowns.app/api/lookup",
-         "method": "GET", "num_param": "number", "format": "flat", "key": ""},
         {"name": "phantom", "url": "https://phantom-osint.unknowns.app/api/v1/lookup",
          "method": "POST", "num_param": "query", "format": "results",
          "key": "", "key_param": "X-API-Key", "key_in": "header",
@@ -75,7 +72,7 @@ def load_cfg() -> dict:
         try:
             cfg.update(json.loads(CONF.read_text()))
         except Exception as e:
-            log.warning("config.json padhne me dikkat: %s", e)
+            log.warning("config.json: %s", e)
 
     for key in list(cfg.keys()):
         if key in ("providers", "admins"):
@@ -105,8 +102,7 @@ def load_cfg() -> dict:
         tok = os.getenv("BOT_TOKEN", "").strip()
         if not tok:
             try:
-                print("\nBotFather se token daalo:")
-                tok = input("> ").strip()
+                tok = input("BotFather token: ").strip()
             except EOFError:
                 tok = ""
         if not tok:
@@ -131,12 +127,12 @@ def init_db() -> None:
         con.execute("""CREATE TABLE IF NOT EXISTS records(
             number TEXT PRIMARY KEY, payload TEXT, source TEXT, updated REAL)""")
         con.execute("""CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
-            credits INTEGER DEFAULT 0,
-            referred_by INTEGER DEFAULT 0,
-            ref_count INTEGER DEFAULT 0,
-            searches INTEGER DEFAULT 0,
-            created REAL DEFAULT 0)""")
+            user_id INTEGER PRIMARY KEY, credits INTEGER DEFAULT 0,
+            referred_by INTEGER DEFAULT 0, ref_count INTEGER DEFAULT 0,
+            searches INTEGER DEFAULT 0, created REAL DEFAULT 0)""")
+        con.execute("""CREATE TABLE IF NOT EXISTS history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+            number TEXT, ts REAL)""")
         for col, ddl in (("credits", "INTEGER DEFAULT 0"),
                          ("referred_by", "INTEGER DEFAULT 0"),
                          ("ref_count", "INTEGER DEFAULT 0"),
@@ -204,24 +200,30 @@ def refund(uid: int) -> None:
         con.execute("UPDATE users SET credits = credits + 1 WHERE user_id=?", (uid,))
 
 
-def count_referral(rid: int) -> None:
-    with db() as con:
-        con.execute("UPDATE users SET ref_count = ref_count + 1 WHERE user_id=?", (rid,))
-
-
 def credits_of(uid: int) -> int:
-    if uid in CFG["admins"]:
-        return -1
-    return get_user(uid)["credits"]
+    return -1 if uid in CFG["admins"] else get_user(uid)["credits"]
 
 
+def add_history(uid: int, number: str) -> None:
+    with db() as con:
+        con.execute("INSERT INTO history(user_id,number,ts) VALUES(?,?,?)",
+                    (uid, number, time.time()))
+
+
+def get_history(uid: int, limit: int = 10) -> list:
+    with db() as con:
+        return con.execute("SELECT number, ts FROM history WHERE user_id=? "
+                           "ORDER BY ts DESC LIMIT ?", (uid, limit)).fetchall()
+
+
+# ───────────────────────────── force join
 async def is_joined(bot, uid: int) -> bool:
     if not CFG["force_chat"]:
         return True
     try:
         m = await bot.get_chat_member(CFG["force_chat"], uid)
     except Exception as e:
-        log.warning("get_chat_member fail (%s): %s", CFG["force_chat"], e)
+        log.warning("get_chat_member fail: %s", e)
         return True
     if m.status in ("creator", "administrator", "member"):
         return True
@@ -244,24 +246,38 @@ JOIN_TEXT = ("👋 <b>Welcome {brand}</b>\n\n"
              "Join ke baad <b>{free}</b> free credits milenge 🎁")
 
 
-def cred_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("🤝 Refer & Earn", callback_data="refer")]]
-    if CFG["buy_url"]:
-        rows.append([InlineKeyboardButton("💳 Buy Credits", url=CFG["buy_url"])])
-    else:
-        rows.append([InlineKeyboardButton("💳 Buy Credits", callback_data="buy")])
-    return InlineKeyboardMarkup(rows)
+# ───────────────────────────── menu
+def menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Number to Info", callback_data="m:num")],
+        [InlineKeyboardButton("💎 My Credits", callback_data="m:cred")],
+        [InlineKeyboardButton("💳 Buy Credits", callback_data="m:buy")],
+        [InlineKeyboardButton("🤝 Refer & Earn", callback_data="m:ref")],
+        [InlineKeyboardButton("📜 My History", callback_data="m:hist")],
+        [InlineKeyboardButton("🆔 My ID", callback_data="m:id")],
+        [InlineKeyboardButton("📞 Contact Admin", callback_data="m:adm")],
+        [InlineKeyboardButton("📺 YouTube", url=CFG["youtube_url"])],
+    ])
 
 
-def cred_footer(uid: int) -> str:
-    c = credits_of(uid)
-    if c < 0:
-        return "\n\n💎 <b>Credits:</b> ∞"
-    if c > 0:
-        return f"\n\n💎 <b>Credits left:</b> {c}"
-    return ("\n\n💎 <b>Credits left:</b> 0\n\n"
-            "To add more credits, click 💳 Buy Credits or earn via referrals: 🤝 Refer & Earn.\n"
-            f"Contact admin: {html.escape(CFG['admin_contact'])}")
+def back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="m:menu")]])
+
+
+def welcome(user) -> str:
+    name = html.escape(user.first_name or "User")
+    return (f"👋 <b>Hello {name}!</b>\n\n"
+            f"📞 <b>WELCOME TO {html.escape(CFG['brand'])} NUMBER INFORMATION BOT</b>\n\n"
+            "• 🔎 Number to Info lookup (Indian mobile)\n"
+            "• 💎 Check your credits balance\n"
+            "• 💳 Buy Credits via UPI\n"
+            f"• 🤝 Refer & Earn – get 1 credit per {CFG['ref_per_credit']} referrals\n"
+            "• 📜 View your history\n"
+            "• 🆔 Get your Telegram ID\n"
+            "• 📞 Contact admin\n\n"
+            f"<b>THANK YOU TEAM {html.escape(CFG['brand'])}</b> 😊\n\n"
+            "⚠️ Use only for legal &amp; ethical purposes.\n\n"
+            "Choose an option below 👇👇👇")
 
 
 def ref_link(bot, uid: int) -> str:
@@ -269,25 +285,19 @@ def ref_link(bot, uid: int) -> str:
     return f"https://t.me/{uname}?start=ref_{uid}"
 
 
+# ───────────────────────────── providers
 ALIASES = {
     "name": ("name", "full_name", "subscriber_name", "truecaller_name"),
     "fname": ("fname", "father_name", "fathersname", "fathername"),
     "aadhaar": ("aadhaar", "aadhar", "aadhaarnumber", "aadharnumber", "uid"),
     "mobile": ("mobile", "phonenumber", "number", "registered_mobile"),
     "alt": ("alt", "alternate", "othernumber", "alternate_number", "alt_number"),
-    "circle": ("circle", "operator", "region", "regions", "telecom_circle"),
+    "circle": ("circle", "operator", "region", "regions", "state", "district",
+               "town", "telecom_circle"),
     "address": ("address", "addresses", "full_address"),
     "email": ("email", "emails"),
     "type": ("line_type", "type"),
     "tz": ("timezone", "time_zone"),
-}
-
-FLAT_MAP = {
-    "name": ("names", "name"),
-    "fname": ("father_names", "father_name"),
-    "circle": ("regions", "circle"),
-    "address": ("addresses", "address"),
-    "email": ("emails", "email"),
 }
 
 
@@ -306,26 +316,6 @@ def extract_records(data):
     return []
 
 
-def adapt_flat(data: dict) -> list:
-    if data.get("found") is False:
-        return []
-    rec = {}
-    for canon, keys in FLAT_MAP.items():
-        for k in keys:
-            v = data.get(k)
-            if isinstance(v, list) and v:
-                v = ", ".join(str(x) for x in v)
-            if v:
-                rec[canon] = v
-                break
-    phones = data.get("phones") or []
-    if phones:
-        rec["mobile"] = phones[0]
-        if len(phones) > 1:
-            rec["alt"] = ", ".join(phones[1:])
-    return [rec] if rec else []
-
-
 def normalize(rec: dict) -> dict:
     low = {str(k).lower(): v for k, v in rec.items()}
     out = {}
@@ -333,7 +323,7 @@ def normalize(rec: dict) -> dict:
         for k in keys:
             v = low.get(k)
             if v not in (None, "", [], {}, "-"):
-                out[canon] = str(v).strip()
+                out[canon] = ", ".join(map(str, v)) if isinstance(v, list) else str(v).strip()
                 break
     return out
 
@@ -352,8 +342,7 @@ async def call_provider(client, p, number):
         params[p["num_param"]] = number
         r = await client.get(p["url"], params=params, headers=headers)
     r.raise_for_status()
-    data = r.json()
-    return adapt_flat(data) if p.get("format") == "flat" else extract_records(data)
+    return extract_records(r.json())
 
 
 TYPES = {0: "Fixed line", 1: "Mobile", 2: "Fixed/Mobile", 3: "Toll free", 4: "Premium",
@@ -399,7 +388,7 @@ async def lookup(number: str):
     return (off, "offline") if off else ([], "none")
 
 
-# ─────────────────────────── render (TERMINAL)
+# ───────────────────────────── render
 TAG = re.compile(r"</?[bi]>")
 
 
@@ -415,10 +404,9 @@ def finish(text: str) -> str:
     return f"<pre>{html.escape(plain)}</pre>" if mode == "pre" else plain
 
 
-def bars(text: str, w: int) -> tuple[str, str]:
+def bars(text: str, w: int) -> tuple:
     head = f"─ {text} "
-    return ("┌" + head + "─" * max(0, w - len(head)) + "┐",
-            "└" + "─" * w + "┘")
+    return ("┌" + head + "─" * max(0, w - len(head)) + "┐", "└" + "─" * w + "┘")
 
 
 def render(number: str, recs: list, source: str = "") -> str:
@@ -429,10 +417,7 @@ def render(number: str, recs: list, source: str = "") -> str:
     top, bot = bars(CFG["brand"].upper(), w)
     t = datetime.now(ZoneInfo(CFG["tz_name"])).strftime("%H:%M")
 
-    o = [top,
-         f"│ $ lookup {esc(number)}",
-         f"│ ✓ {len(recs)} match  ·  {t}",
-         bot]
+    o = [top, f"│ $ lookup {esc(number)}", f"│ ✓ {len(recs)} match  ·  {t}", bot]
     for i, r in enumerate(recs, 1):
         o += ["", f"┃ {i:02d}"]
         for label, key in fields:
@@ -456,12 +441,7 @@ def pmode():
     return ParseMode.HTML if CFG["send_mode"] in ("html", "pre") else None
 
 
-# ─────────────────────────── handlers
-HELP = ("<b>{brand}</b>\n\n"
-        "Mobile number bhejo, pura record nikal dunga.\nExample: <code>8840224499</code>\n\n"
-        "💎 Credits: <b>{credits}</b>\n\n"
-        "/start /help /credits /region /stats")
-
+# ───────────────────────────── commands
 _last: dict = {}
 
 
@@ -473,10 +453,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not CFG["admins"]:
         CFG["admins"] = [uid]
         save_cfg(CFG)
-        await msg.reply_text(f"👑 Tum admin ban gaye (ID {uid}).")
+        await msg.reply_text(f"👑 DARK_CYBER (ID {uid}).")
 
     args = ctx.args or []
-    bonus = ""
     if args and args[0].startswith("ref_"):
         try:
             rid = int(args[0][4:])
@@ -486,35 +465,29 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if rid and rid != uid and not u["referred_by"]:
             with db() as con:
                 con.execute("UPDATE users SET referred_by=? WHERE user_id=?", (rid, uid))
-            add_credits(uid, CFG["refer_credits"])
-            add_credits(rid, CFG["refer_credits"])
-            count_referral(rid)
-            bonus = f"\n\n🤝 Referral bonus! +{CFG['refer_credits']} credits mile 🎁"
-            try:
-                await ctx.bot.send_message(
-                    rid, f"🎉 Kisi ne tumhara link use kiya!\n+{CFG['refer_credits']} credits mile.")
-            except Exception:
-                pass
+                con.execute("UPDATE users SET ref_count = ref_count + 1 WHERE user_id=?", (rid,))
+                total = con.execute("SELECT ref_count FROM users WHERE user_id=?",
+                                    (rid,)).fetchone()[0]
+            if total % CFG["ref_per_credit"] == 0:
+                add_credits(rid, 1)
+                try:
+                    await ctx.bot.send_message(rid, "🎉 Referral complete! +1 credit mila.")
+                except Exception:
+                    pass
 
     if not await is_joined(ctx.bot, uid):
         await msg.reply_text(JOIN_TEXT.format(brand=CFG["brand"], free=CFG["free_credits"]),
                              parse_mode=ParseMode.HTML, reply_markup=join_kb())
         return
 
-    c = credits_of(uid)
-    await msg.reply_text(
-        HELP.format(brand=CFG["brand"], credits="∞" if c < 0 else c) + bonus,
-        parse_mode=ParseMode.HTML, reply_markup=cred_kb())
+    await msg.reply_text(welcome(update.effective_user), parse_mode=ParseMode.HTML,
+                         reply_markup=menu_kb())
 
 
-async def cmd_credits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    c = credits_of(uid)
-    u = get_user(uid)
+async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        f"💎 Credits: <b>{'∞' if c < 0 else c}</b>\n🤝 Referrals: <b>{u['ref_count']}</b>\n\n"
-        f"Tumhara link:\n<code>{ref_link(ctx.bot, uid)}</code>",
-        parse_mode=ParseMode.HTML, reply_markup=cred_kb())
+        f"🆔 Your Telegram ID:\n<code>{update.effective_user.id}</code>",
+        parse_mode=ParseMode.HTML, reply_markup=back_kb())
 
 
 async def cmd_addcredits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -527,23 +500,8 @@ async def cmd_addcredits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     total = add_credits(int(a[0]), int(a[1]))
     await update.effective_message.reply_text(
-        f"✅ <code>{a[0]}</code> ko {a[1]} credits diye. Ab total: <b>{total}</b>",
+        f"✅ <code>{a[0]}</code> ko {a[1]} credits. Ab total: <b>{total}</b>",
         parse_mode=ParseMode.HTML)
-
-
-async def cmd_region(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    a = ctx.args or []
-    if not a:
-        await update.effective_message.reply_text(f"Region: <b>{CFG['region']}</b>",
-                                                 parse_mode=ParseMode.HTML)
-        return
-    if a[0].upper() not in phonenumbers.SUPPORTED_REGIONS:
-        await update.effective_message.reply_text("Galat ISO code.")
-        return
-    CFG["region"] = a[0].upper()
-    save_cfg(CFG)
-    await update.effective_message.reply_text(f"Region: <b>{CFG['region']}</b>",
-                                             parse_mode=ParseMode.HTML)
 
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -562,7 +520,7 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parts = update.effective_message.text.split(" ", 1)
     if len(parts) < 2:
         await update.effective_message.reply_text(
-            "Format:\n<code>/add 8840224499 | name=Gaurav | fname=Ram | address=...</code>",
+            "Format:\n<code>/add 8840224499 | name=X | fname=Y | address=...</code>",
             parse_mode=ParseMode.HTML)
         return
     bits = [b.strip() for b in parts[1].split("|") if b.strip()]
@@ -575,7 +533,8 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rec.setdefault("mobile", num)
     old, _, _ = db_get(num)
     db_put(num, (old or []) + [rec], "manual")
-    await update.effective_message.reply_text(f"✅ Saved <code>{num}</code>", parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(f"✅ Saved <code>{num}</code>",
+                                             parse_mode=ParseMode.HTML)
 
 
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -597,47 +556,90 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"✅ {ok}/{len(ids)}")
 
 
-async def cmd_id(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(f"ID: <code>{update.effective_user.id}</code>",
-                                             parse_mode=ParseMode.HTML)
-
-
+# ───────────────────────────── callbacks
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     uid = q.from_user.id
+    d = q.data or ""
 
-    if q.data == "checkjoin":
+    if d == "checkjoin":
         if await is_joined(ctx.bot, uid):
             await q.answer("✅ Verified!")
-            c = credits_of(uid)
-            await q.message.edit_text(
-                HELP.format(brand=CFG["brand"], credits="∞" if c < 0 else c),
-                parse_mode=ParseMode.HTML, reply_markup=cred_kb())
+            await q.message.edit_text(welcome(q.from_user), parse_mode=ParseMode.HTML,
+                                      reply_markup=menu_kb())
         else:
-            await q.answer("Abhi join nahi kiya 🙂 pehle channel join karo.", show_alert=True)
+            await q.answer("Pehle channel join karo 🙂", show_alert=True)
         return
 
-    if q.data == "refer":
-        await q.answer()
+    if not await is_joined(ctx.bot, uid):
+        await q.answer("Pehle channel join karo 🙂", show_alert=True)
+        return
+
+    await q.answer()
+
+    if d == "m:menu":
+        await q.message.edit_text(welcome(q.from_user), parse_mode=ParseMode.HTML,
+                                  reply_markup=menu_kb())
+        return
+
+    if d == "m:num":
+        ctx.user_data["await"] = True
+        await q.message.reply_text(
+            "📞 Send the Indian mobile number (10 digits, e.g. 9876543210).\n"
+            "Each lookup costs 1 credit.", reply_markup=back_kb())
+        return
+
+    if d == "m:cred":
+        c = credits_of(uid)
         u = get_user(uid)
         await q.message.reply_text(
-            f"🤝 <b>Refer & Earn</b>\n\n"
-            f"Apna link share karo — jisne bhi join karega, tumhe "
-            f"<b>+{CFG['refer_credits']}</b> credits milenge (usse bhi milenge).\n\n"
-            f"Tumhara link:\n<code>{ref_link(ctx.bot, uid)}</code>\n\n"
-            f"Ab tak referrals: <b>{u['ref_count']}</b>",
-            parse_mode=ParseMode.HTML)
+            f"💎 <b>Credits:</b> {'∞' if c < 0 else c}\n🤝 Referrals: <b>{u['ref_count']}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=back_kb())
         return
 
-    if q.data == "buy":
-        await q.answer()
+    if d == "m:buy":
         await q.message.reply_text(
-            f"💳 <b>Buy Credits</b>\n\nContact admin: {html.escape(CFG['admin_contact'])}\n\n"
-            f"Batao kitne credits chahiye, admin add kar dega.",
-            parse_mode=ParseMode.HTML)
+            f"💳 <b>Buy Credits via UPI</b>\n\nContact admin: {html.escape(CFG['admin_contact'])}\n\n"
+            f"Kitne credits chahiye batao, admin add kar dega.",
+            parse_mode=ParseMode.HTML, reply_markup=back_kb())
+        return
+
+    if d == "m:ref":
+        u = get_user(uid)
+        need = CFG["ref_per_credit"] - (u["ref_count"] % CFG["ref_per_credit"])
+        await q.message.reply_text(
+            f"🤝 <b>Refer & Earn</b>\n\n"
+            f"Har <b>{CFG['ref_per_credit']}</b> referral pe <b>1 credit</b> milega.\n\n"
+            f"Tumhara link:\n<code>{ref_link(ctx.bot, uid)}</code>\n\n"
+            f"Referrals: <b>{u['ref_count']}</b>\n"
+            f"Agle credit ke liye <b>{need}</b> aur chahiye.",
+            parse_mode=ParseMode.HTML, reply_markup=back_kb())
+        return
+
+    if d == "m:hist":
+        rows = get_history(uid)
+        if not rows:
+            await q.message.reply_text("📜 Abhi koi history nahi.", reply_markup=back_kb())
+            return
+        lines = [f"<code>{n}</code> — {datetime.fromtimestamp(t, ZoneInfo(CFG['tz_name'])).strftime('%d-%m %H:%M')}"
+                 for n, t in rows]
+        await q.message.reply_text("📜 <b>Last searches</b>\n\n" + "\n".join(lines),
+                                   parse_mode=ParseMode.HTML, reply_markup=back_kb())
+        return
+
+    if d == "m:id":
+        await q.message.reply_text(f"🆔 Your Telegram ID:\n<code>{uid}</code>",
+                                   parse_mode=ParseMode.HTML, reply_markup=back_kb())
+        return
+
+    if d == "m:adm":
+        await q.message.reply_text(
+            f"📞 <b>Contact Admin</b>\n\n{html.escape(CFG['admin_contact'])}",
+            parse_mode=ParseMode.HTML, reply_markup=back_kb())
         return
 
 
+# ───────────────────────────── lookup handler
 async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg, user = update.effective_message, update.effective_user
     uid = user.id
@@ -663,12 +665,12 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         nums = [re.sub(r"\D", "", phonenumbers.format_number(
             m.number, phonenumbers.PhoneNumberFormat.NATIONAL)) for m in found]
     else:
-        d = re.sub(r"\D", "", text)
-        if len(d) < 10:
-            await msg.reply_text("Number samajh nahi aaya. Example: <code>8840224499</code>",
-                                 parse_mode=ParseMode.HTML)
+        dg = re.sub(r"\D", "", text)
+        if len(dg) < 10:
+            await msg.reply_text("📞 Send the Indian mobile number (10 digits, e.g. 9876543210).",
+                                 reply_markup=back_kb())
             return
-        nums = [d[-10:]]
+        nums = [dg[-10:]]
 
     spent = 0
     if uid not in CFG["admins"]:
@@ -678,11 +680,15 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 break
         if spent == 0:
-            await msg.reply_text("💎 <b>Credits left:</b> 0\n\n"
-                                 "To add more credits, click 💳 Buy Credits or earn via "
-                                 "referrals: 🤝 Refer & Earn.\n"
-                                 f"Contact admin: {html.escape(CFG['admin_contact'])}",
-                                 parse_mode=ParseMode.HTML, reply_markup=cred_kb())
+            await msg.reply_text(
+                f"💎 <b>Credits left:</b> 0\n\n"
+                f"💳 Buy Credits ya 🤝 Refer & Earn se credits lo.\n"
+                f"Admin: {html.escape(CFG['admin_contact'])}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💳 Buy Credits", callback_data="m:buy")],
+                    [InlineKeyboardButton("🤝 Refer & Earn", callback_data="m:ref")],
+                    [InlineKeyboardButton("🔙 Menu", callback_data="m:menu")]]))
             return
         nums = nums[:spent]
 
@@ -693,17 +699,20 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not blocks:
         for _ in range(spent):
             refund(uid)
-        await st.edit_text("⚠️ <b>Koi record nahi mila.</b>\nCredits refund kar diye.",
-                           parse_mode=ParseMode.HTML)
+        await st.edit_text("⚠️ <b>Koi record nahi mila.</b>\nCredit refund kar diya.",
+                           parse_mode=ParseMode.HTML, reply_markup=back_kb())
         return
 
-    body = "\n\n".join(blocks) + cred_footer(uid)
+    for n in nums:
+        add_history(uid, n)
+
+    c = credits_of(uid)
+    body = "\n\n".join(blocks) + (f"\n\n💎 <b>Credits left:</b> {'∞' if c < 0 else c}")
     parts = chunks(body)
-    kb = cred_kb() if credits_of(uid) == 0 else None
     try:
-        await st.edit_text(parts[0], parse_mode=pmode(), reply_markup=kb)
+        await st.edit_text(parts[0], parse_mode=pmode(), reply_markup=back_kb())
     except Exception:
-        await msg.reply_text(parts[0], parse_mode=pmode(), reply_markup=kb)
+        await msg.reply_text(parts[0], parse_mode=pmode(), reply_markup=back_kb())
     for p in parts[1:]:
         await msg.reply_text(p, parse_mode=pmode())
 
@@ -712,13 +721,11 @@ def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
-    app.add_handler(CommandHandler("credits", cmd_credits))
+    app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("addcredits", cmd_addcredits))
-    app.add_handler(CommandHandler("region", cmd_region))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-    app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     log.info("Bot live. Mode=%s", CFG["mode"])
